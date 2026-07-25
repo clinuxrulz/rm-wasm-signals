@@ -1,0 +1,16 @@
+{
+  "name": "js-reactivity-benchmark-node",
+  "version": "0.0.0",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --target=esnext --platform=node --outdir=dist --sourcemap=external",
+    "build:rm": "esbuild src/run-rm.ts --bundle --format=esm --target=esnext --platform=node --outdir=dist --out-extension:.js=.rm.js --sourcemap=external",
+    "run": "node --expose-gc dist/index.js",
+    "run:rm": "node --expose-gc dist/run-rm.js"
+  },
+  "dependencies": {
+    "@types/node": "^24.3.0",
+    "esbuild": "^0.25.9",
+    "js-reactivity-benchmark": "workspace:*"
+  },
+  "packageManager": "pnpm@10.14.0"
+}

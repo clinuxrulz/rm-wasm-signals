@@ -1,0 +1,19 @@
+{
+  "name": "js-reactivity-benchmark-root",
+  "version": "0.0.0",
+  "scripts": {
+    "format": "prettier --write .",
+    "build:core": "pnpm --filter js-reactivity-benchmark build",
+    "build:node": "pnpm --filter js-reactivity-benchmark-node build",
+    "build:node:rm": "pnpm --filter js-reactivity-benchmark-node build:rm",
+    "build": "pnpm build:core && pnpm build:node",
+    "run:node": "node --expose-gc packages/node/dist/index.js",
+    "run:node:rm": "node --expose-gc packages/node/dist/run-rm.rm.js",
+    "bench": "pnpm build && pnpm run:node",
+    "bench:rm": "pnpm build:core && pnpm build:node:rm && pnpm run:node:rm"
+  },
+  "dependencies": {
+    "prettier": "^3.8.1"
+  },
+  "packageManager": "pnpm@10.29.3"
+}

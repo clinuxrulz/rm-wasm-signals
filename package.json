@@ -1,0 +1,29 @@
+{
+  "name": "rm-wasm-signals",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:bench": "vitest run benchmarks/benchmark.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "rm-wasm": "file:../rm-wasm",
+    "tinybench": "^6.1.2",
+    "wabt": "^1.0.39"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
+  }
+}

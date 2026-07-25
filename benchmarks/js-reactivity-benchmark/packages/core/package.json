@@ -1,0 +1,42 @@
+{
+  "name": "js-reactivity-benchmark",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "tsc": "tsc",
+    "test": "vitest",
+    "build": "esbuild src/index.ts --bundle --format=esm --target=esnext --platform=node --outdir=dist --sourcemap=external",
+    "build:types": "tsc -p tsconfig.json || echo 'tsc: type errors exist (declarations may be incomplete)'"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@amadeus-it-group/tansu": "^2.0.0",
+    "@angular/core": "21.1.4",
+    "@preact/signals": "^2.8.0",
+    "@reactively/core": "^0.0.8",
+    "@solidjs/signals": "^0.10.2",
+    "@vue/reactivity": "^3.5.28",
+    "alien-signals": "^3.1.2",
+    "compostate": "^0.5.1",
+    "esbuild": "^0.27.3",
+    "mobx": "^6.15.0",
+    "mol_wire_lib": "^1.0.1683",
+    "oby": "15.1.2",
+    "pota": "^0.20.226",
+    "preact": "^10.28.3",
+    "s-js": "^0.4.9",
+    "signal-polyfill": "^0.2.2",
+    "solid-js": "^1.9.11",
+    "svelte": "^5.51.1",
+    "typescript": "^5.9.3",
+    "usignal": "^0.10.0",
+    "@types/node": "^26.0.0",
+    "vitest": "^4.0.18"
+  },
+  "packageManager": "pnpm@10.29.3"
+}
