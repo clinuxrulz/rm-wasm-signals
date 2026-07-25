@@ -27,11 +27,11 @@ export const SN_BYTES = 24;
 const LINK_BASE = POOL_BASE + POOL_CAP * SN_BYTES;
 const LN_BYTES = 24;
 
-const F_EFFECT = 1;
-const F_COMPUTED = 2;
-const F_DIRTY = 4;
-const F_CHECK = 8;
-const F_IN_HEAP = 16;
+export const F_EFFECT = 1;
+export const F_COMPUTED = 2;
+export const F_DIRTY = 4;
+export const F_CHECK = 8;
+export const F_IN_HEAP = 16;
 
 export function defineEngine() {
   clearRegistry();

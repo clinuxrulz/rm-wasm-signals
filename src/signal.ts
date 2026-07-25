@@ -1,4 +1,4 @@
-import { defineEngine, compileEngine } from "./engine.js";
+import { defineEngine, compileEngine, F_COMPUTED, F_DIRTY, F_CHECK } from "./engine.js";
 import { ValueMap } from "./value-map.js";
 
 type WasmExports = {
@@ -6,22 +6,17 @@ type WasmExports = {
   __sig_alloc_signal(initialId: number): number;
   __sig_alloc_effect(initialId: number): number;
   __sig_alloc_computed(initialId: number): number;
-  __sig_read(sigIdx: number): number;
   __sig_write(sigIdx: number, valueId: number): void;
   __sig_flush(): void;
-  __sig_track_store(sigIdx: number): void;
   __sig_process_tracking(count: number): void;
-  __sig_get_value(sigIdx: number): number;
-  __sig_set_observer(idx: number): void;
-  __sig_get_observer(): number;
   memory: WebAssembly.Memory;
 };
 
 const G_OBSERVER = 0;
 const G_EFFECT_COUNT = 6;
-const G_TRACKED_VALUE = 7;
 const EFFECT_BUF = 144;
 const TRACK_BUF = 65680;
+const TRACK_BUF_SIZE = 1024;
 const POOL_BASE_I32 = 66704;
 const SN = 6;
 
@@ -43,13 +38,19 @@ export async function init(): Promise<ReactiveAPI> {
   const valueMap = new ValueMap();
   const objectSignals = new Set<number>();
   let wasm: WasmExports;
+  let trackPos = 0;
 
   const bridge = {
     recompute: (computedIdx: number): number => {
       const fn = computedFns.get(computedIdx);
       if (!fn) return 0;
       view()[G_OBSERVER] = computedIdx;
+      trackPos = 0;
       const result = fn();
+      if (trackPos > 0) {
+        wasm.__sig_process_tracking(trackPos);
+        trackPos = 0;
+      }
       view()[G_OBSERVER] = 0;
       if (typeof result === 'number') return result;
       return valueMap.alloc(result);
@@ -74,19 +75,6 @@ export async function init(): Promise<ReactiveAPI> {
     return memoryView;
   };
 
-  const readValue = <T>(sigIdx: number): T => {
-    const val = view()[POOL_BASE_I32 + sigIdx * SN];
-    if (objectSignals.has(sigIdx)) return valueMap.get(val) as T;
-    return val as unknown as T;
-  };
-
-  const readTracked = <T>(sigIdx: number): T => {
-    wasm.__sig_track_store(sigIdx);
-    const val = view()[G_TRACKED_VALUE];
-    if (objectSignals.has(sigIdx)) return valueMap.get(val) as T;
-    return val as unknown as T;
-  };
-
   const createSignal = <T>(initial: T): [() => T, (v: T) => void] => {
     let sigIdx: number;
     if (typeof initial === 'number') {
@@ -98,8 +86,23 @@ export async function init(): Promise<ReactiveAPI> {
     }
 
     const getter = (): T => {
-      if (view()[G_OBSERVER] !== 0) return readTracked<T>(sigIdx);
-      return readValue<T>(sigIdx);
+      const u32 = view();
+      const depAddr = POOL_BASE_I32 + sigIdx * SN;
+      if (u32[G_OBSERVER] !== 0) {
+        u32[TRACK_BUF + (trackPos++)] = sigIdx;
+        if (trackPos >= TRACK_BUF_SIZE) {
+          wasm.__sig_process_tracking(trackPos);
+          trackPos = 0;
+        }
+        const flags = u32[depAddr + 3];
+        if ((flags & F_COMPUTED) && (flags & (F_DIRTY | F_CHECK))) {
+          wasm.__sig_process_tracking(trackPos);
+          trackPos = 0;
+        }
+      }
+      const val = u32[depAddr];
+      if (objectSignals.has(sigIdx)) return valueMap.get(val) as T;
+      return val as unknown as T;
     };
 
     const setter = (val: T): void => {
@@ -121,7 +124,12 @@ export async function init(): Promise<ReactiveAPI> {
     computedFns.set(idx, fn);
 
     view()[G_OBSERVER] = idx;
+    trackPos = 0;
     const initial = fn();
+    if (trackPos > 0) {
+      wasm.__sig_process_tracking(trackPos);
+      trackPos = 0;
+    }
     view()[G_OBSERVER] = 0;
     if (typeof initial === 'number') {
       wasm.__sig_write(idx, initial);
@@ -131,8 +139,23 @@ export async function init(): Promise<ReactiveAPI> {
     }
 
     return () => {
-      if (view()[G_OBSERVER] !== 0) return readTracked<T>(idx);
-      return readValue<T>(idx);
+      const u32 = view();
+      const depAddr = POOL_BASE_I32 + idx * SN;
+      if (u32[G_OBSERVER] !== 0) {
+        u32[TRACK_BUF + (trackPos++)] = idx;
+        if (trackPos >= TRACK_BUF_SIZE) {
+          wasm.__sig_process_tracking(trackPos);
+          trackPos = 0;
+        }
+        const flags = u32[depAddr + 3];
+        if ((flags & F_COMPUTED) && (flags & (F_DIRTY | F_CHECK))) {
+          wasm.__sig_process_tracking(trackPos);
+          trackPos = 0;
+        }
+      }
+      const val = u32[depAddr];
+      if (objectSignals.has(idx)) return valueMap.get(val) as T;
+      return val as unknown as T;
     };
   };
 
@@ -141,7 +164,12 @@ export async function init(): Promise<ReactiveAPI> {
     effectFns.set(idx, fn);
 
     view()[G_OBSERVER] = idx;
+    trackPos = 0;
     fn();
+    if (trackPos > 0) {
+      wasm.__sig_process_tracking(trackPos);
+      trackPos = 0;
+    }
     view()[G_OBSERVER] = 0;
   };
 
@@ -156,7 +184,12 @@ export async function init(): Promise<ReactiveAPI> {
         const fn = effectFns.get(effectIdx);
         if (!fn) continue;
         u32[G_OBSERVER] = effectIdx;
+        trackPos = 0;
         fn();
+        if (trackPos > 0) {
+          wasm.__sig_process_tracking(trackPos);
+          trackPos = 0;
+        }
         u32[G_OBSERVER] = 0;
       }
     }
