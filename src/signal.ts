@@ -46,14 +46,16 @@ export async function init(): Promise<ReactiveAPI> {
     recompute: (computedIdx: number): number => {
       const fn = computedFns.get(computedIdx);
       if (!fn) return 0;
-      view()[G_OBSERVER] = computedIdx;
+      const u32 = view();
+      const prevObserver = u32[G_OBSERVER];
+      u32[G_OBSERVER] = computedIdx;
       trackPos = 0;
       const result = fn();
       if (trackPos > 0) {
         wasm.__sig_process_tracking(trackPos);
         trackPos = 0;
       }
-      view()[G_OBSERVER] = 0;
+      u32[G_OBSERVER] = prevObserver;
       if (typeof result === 'number') return result;
       return valueMap.alloc(result);
     },
