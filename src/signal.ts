@@ -6,9 +6,9 @@ type WasmExports = {
   __sig_alloc_signal(initialId: number): number;
   __sig_alloc_effect(initialId: number): number;
   __sig_alloc_computed(initialId: number): number;
-  __sig_write(sigIdx: number, valueId: number): void;
   __sig_flush(): void;
   __sig_process_tracking(count: number): void;
+  __sig_process_and_flush(count: number): void;
   memory: WebAssembly.Memory;
 };
 
@@ -17,7 +17,9 @@ const G_EFFECT_COUNT = 6;
 const EFFECT_BUF = 144;
 const TRACK_BUF = 65680;
 const TRACK_BUF_SIZE = 1024;
-const POOL_BASE_I32 = 66704;
+const WRITE_BUF = 66704;
+const WRITE_BUF_SIZE = 1024;
+const POOL_BASE_I32 = 67728;
 const SN = 6;
 
 export interface ReactiveAPI {
@@ -38,6 +40,7 @@ export async function init(): Promise<ReactiveAPI> {
   const valueMap = new ValueMap();
   let wasm: WasmExports;
   let trackPos = 0;
+  let writePos = 0;
 
   const bridge = {
     recompute: (computedIdx: number): number => {
@@ -106,10 +109,15 @@ export async function init(): Promise<ReactiveAPI> {
 
     const setter = (val: T): void => {
       const u32 = view();
-      if (u32[POOL_BASE_I32 + sigIdx * SN + 3] & F_HAS_OBJECT) {
-        wasm.__sig_write(sigIdx, valueMap.alloc(val));
-      } else {
-        wasm.__sig_write(sigIdx, val as number);
+      const depAddr = POOL_BASE_I32 + sigIdx * SN;
+      const newId = u32[depAddr + 3] & F_HAS_OBJECT ? valueMap.alloc(val) : val as number;
+      if (u32[depAddr] !== newId) {
+        u32[depAddr] = newId;
+        u32[WRITE_BUF + (writePos++)] = sigIdx;
+        if (writePos >= WRITE_BUF_SIZE) {
+          wasm.__sig_process_and_flush(writePos);
+          writePos = 0;
+        }
       }
       if (batching === 0) {
         queueMicrotask(() => flush());
@@ -132,10 +140,10 @@ export async function init(): Promise<ReactiveAPI> {
     }
     view()[G_OBSERVER] = 0;
     if (typeof initial === 'number') {
-      wasm.__sig_write(idx, initial);
+      view()[POOL_BASE_I32 + idx * SN] = initial;
     } else {
+      view()[POOL_BASE_I32 + idx * SN] = valueMap.alloc(initial);
       view()[POOL_BASE_I32 + idx * SN + 3] |= F_HAS_OBJECT;
-      wasm.__sig_write(idx, valueMap.alloc(initial));
     }
 
     return () => {
@@ -174,7 +182,12 @@ export async function init(): Promise<ReactiveAPI> {
   };
 
   const flush = (): void => {
-    wasm.__sig_flush();
+    if (writePos > 0) {
+      wasm.__sig_process_and_flush(writePos);
+      writePos = 0;
+    } else {
+      wasm.__sig_flush();
+    }
     const u32 = view();
     const count = u32[G_EFFECT_COUNT];
     if (count > 0) {
@@ -210,6 +223,7 @@ export async function init(): Promise<ReactiveAPI> {
     computedFns.clear();
     effectFns.clear();
     valueMap.clear();
+    writePos = 0;
     wasm.__sig_init();
   };
 

@@ -18,10 +18,12 @@ export const EFFECT_BUF_SIZE = 65536;
 export const EFFECT_BUF = HEAP_BASE + HEAP_CAP * 4;
 export const TRACK_BUF_SIZE = 1024;
 export const TRACK_BUF = EFFECT_BUF + EFFECT_BUF_SIZE * 4;
+export const WRITE_BUF_SIZE = 1024;
+export const WRITE_BUF = TRACK_BUF + TRACK_BUF_SIZE * 4;
 export const POOL_CAP = 1 << 22;
 export const MEMORY_PAGES = 4096;
 
-export const POOL_BASE = TRACK_BUF + TRACK_BUF_SIZE * 4;
+export const POOL_BASE = WRITE_BUF + WRITE_BUF_SIZE * 4;
 export const SN_BYTES = 24;
 
 const LINK_BASE = POOL_BASE + POOL_CAP * SN_BYTES;
@@ -218,6 +220,35 @@ export function defineEngine() {
       });
       i.assign(i.add(i32(1)));
     });
+  });
+
+  Fn("__sig_process_writes", {
+    params: [{ name: "count", type: "i32" }],
+    result: "void",
+  }, (count) => {
+    let i = i32(0).toVar();
+    While(i.lt(count), () => {
+      let sigIdx = asmExpr(`(i32.load (i32.add (i32.const ${WRITE_BUF}) (i32.mul $0 (i32.const 4))))`, "i32", i);
+      let addr = i32(POOL_BASE).add(sigIdx.mul(i32(SN_BYTES)));
+      let subHead = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(4))).toVar();
+      While(subHead.ge(i32(0)), () => {
+        let lnk = i32(LINK_BASE).add(subHead.mul(i32(LN_BYTES)));
+        let subIdx = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(4)));
+        asm(`(call $__mark_dirty $0)`, subIdx);
+        asm(`(call $__heap_insert $0)`, subIdx);
+        let nxt = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(16)));
+        subHead.assign(nxt);
+      });
+      i.assign(i.add(i32(1)));
+    });
+  });
+
+  Fn("__sig_process_and_flush", {
+    params: [{ name: "count", type: "i32" }],
+    result: "void",
+  }, (count) => {
+    asm(`(call $__sig_process_writes $0)`, count);
+    asm(`(call $__sig_flush)`);
   });
 
   Fn("__sig_write", {
@@ -432,8 +463,8 @@ export function compileEngine(): string {
   let wat = compileWAT({
     exports: [
       "__sig_init", "__sig_alloc_signal", "__sig_alloc_effect", "__sig_alloc_computed",
-      "__sig_read", "__sig_write", "__sig_flush", "__sig_get_value",
-      "__sig_track_store", "__sig_process_tracking",
+      "__sig_read", "__sig_flush", "__sig_get_value",
+      "__sig_track_store", "__sig_process_tracking", "__sig_process_and_flush",
       "__sig_set_observer", "__sig_get_observer",
       "__sig_link_impl", "__heap_insert", "__mark_dirty",
       "__sig_mark_heap", "__update_if_necessary",
