@@ -1,4 +1,4 @@
-import { defineEngine, compileEngine, F_COMPUTED, F_DIRTY, F_CHECK } from "./engine.js";
+import { defineEngine, compileEngine, F_COMPUTED, F_DIRTY, F_CHECK, F_HAS_OBJECT } from "./engine.js";
 import { ValueMap } from "./value-map.js";
 
 type WasmExports = {
@@ -36,7 +36,6 @@ export async function init(): Promise<ReactiveAPI> {
   const computedFns = new Map<number, () => any>();
   const effectFns = new Map<number, () => void>();
   const valueMap = new ValueMap();
-  const objectSignals = new Set<number>();
   let wasm: WasmExports;
   let trackPos = 0;
 
@@ -82,7 +81,7 @@ export async function init(): Promise<ReactiveAPI> {
     } else {
       const id = valueMap.alloc(initial);
       sigIdx = wasm.__sig_alloc_signal(id);
-      objectSignals.add(sigIdx);
+      view()[POOL_BASE_I32 + sigIdx * SN + 3] |= F_HAS_OBJECT;
     }
 
     const getter = (): T => {
@@ -101,12 +100,13 @@ export async function init(): Promise<ReactiveAPI> {
         }
       }
       const val = u32[depAddr];
-      if (objectSignals.has(sigIdx)) return valueMap.get(val) as T;
+      if (u32[depAddr + 3] & F_HAS_OBJECT) return valueMap.get(val) as T;
       return val as unknown as T;
     };
 
     const setter = (val: T): void => {
-      if (objectSignals.has(sigIdx)) {
+      const u32 = view();
+      if (u32[POOL_BASE_I32 + sigIdx * SN + 3] & F_HAS_OBJECT) {
         wasm.__sig_write(sigIdx, valueMap.alloc(val));
       } else {
         wasm.__sig_write(sigIdx, val as number);
@@ -134,7 +134,7 @@ export async function init(): Promise<ReactiveAPI> {
     if (typeof initial === 'number') {
       wasm.__sig_write(idx, initial);
     } else {
-      objectSignals.add(idx);
+      view()[POOL_BASE_I32 + idx * SN + 3] |= F_HAS_OBJECT;
       wasm.__sig_write(idx, valueMap.alloc(initial));
     }
 
@@ -154,7 +154,7 @@ export async function init(): Promise<ReactiveAPI> {
         }
       }
       const val = u32[depAddr];
-      if (objectSignals.has(idx)) return valueMap.get(val) as T;
+      if (u32[depAddr + 3] & F_HAS_OBJECT) return valueMap.get(val) as T;
       return val as unknown as T;
     };
   };
@@ -210,7 +210,6 @@ export async function init(): Promise<ReactiveAPI> {
     computedFns.clear();
     effectFns.clear();
     valueMap.clear();
-    objectSignals.clear();
     wasm.__sig_init();
   };
 

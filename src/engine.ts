@@ -32,6 +32,7 @@ export const F_COMPUTED = 2;
 export const F_DIRTY = 4;
 export const F_CHECK = 8;
 export const F_IN_HEAP = 16;
+export const F_HAS_OBJECT = 32;
 
 export function defineEngine() {
   clearRegistry();
@@ -366,7 +367,7 @@ export function defineEngine() {
         let nxt = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(20))).toVar();
         asm(`(i32.store $0 (i32.const -1))`, addr.add(i32(20)));
         let flags = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(12)));
-        asm(`(i32.store $0 $1)`, addr.add(i32(12)), flags.and(i32(F_EFFECT | F_COMPUTED)));
+        asm(`(i32.store $0 $1)`, addr.add(i32(12)), flags.and(i32(F_EFFECT | F_COMPUTED | F_HAS_OBJECT)));
         If(flags.and(i32(F_EFFECT)).ne(i32(0)), () => {
           let ec = asmExpr(`(i32.load (i32.const ${G_EFFECT_COUNT}))`, "i32");
           asm(`(i32.store (i32.add (i32.const ${EFFECT_BUF}) (i32.mul $0 (i32.const 4))) $1)`, ec, node);
@@ -404,7 +405,7 @@ export function defineEngine() {
       recomputeAndNotify(sigIdx, addr);
     });
     let clearFlags = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(12)));
-    asm(`(i32.store $0 $1)`, addr.add(i32(12)), clearFlags.and(i32(F_EFFECT | F_COMPUTED)));
+    asm(`(i32.store $0 $1)`, addr.add(i32(12)), clearFlags.and(i32(F_EFFECT | F_COMPUTED | F_HAS_OBJECT)));
   });
 
   Fn("__sig_get_value", {
