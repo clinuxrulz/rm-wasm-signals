@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "rm-wasm": "file:../rm-wasm",
+    "@random-mesh/rm-wasm": "0.1.2",
     "tinybench": "^6.1.2",
     "wabt": "^1.0.39"
   },

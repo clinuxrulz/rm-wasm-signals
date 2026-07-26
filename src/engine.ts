@@ -1,6 +1,6 @@
 import {
   Fn, If, While, i32, compileWAT, clearRegistry, asm, asmExpr, Node
-} from "rm-wasm";
+} from "@random-mesh/rm-wasm";
 
 export const G_OBSERVER = 0;
 export const G_EPOCH = 4;
