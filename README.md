@@ -1,6 +1,6 @@
 # rm-wasm-signals
 
-A fine-grained reactive signals library that runs its core engine in **WebAssembly** (WAT), compiled via the [`rm-wasm`](https://github.com/anomalyco/rm-wasm) DSL. The scheduling algorithm is based on [R3](https://github.com/milomg/r3)'s topological height-ordered approach with lazy marking (Check/Dirty flags) and a heap-based flush.
+A fine-grained reactive signals library that runs its core engine in **WebAssembly** (WAT), compiled via the [`rm-wasm`](https://github.com/clinuxrulz/rm-wasm) DSL. The scheduling algorithm is based on [R3](https://github.com/milomg/r3)'s topological height-ordered approach with lazy marking (Check/Dirty flags) and a heap-based flush.
 
 ## Motivation
 
