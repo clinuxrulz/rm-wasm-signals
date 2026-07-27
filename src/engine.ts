@@ -10,6 +10,7 @@ export const G_HEAP_MIN = 16;
 export const G_HEAP_MAX = 20;
 export const G_EFFECT_COUNT = 24;
 export const G_TRACKED_VALUE = 28;
+export const G_FREE_LINK = 32;
 export const GLOBALS_END = 64;
 
 export const HEAP_BASE = 64;
@@ -23,7 +24,11 @@ export const WRITE_BUF = TRACK_BUF + TRACK_BUF_SIZE * 4;
 export const POOL_CAP = 1 << 22;
 export const MEMORY_PAGES = 4096;
 
-export const POOL_BASE = WRITE_BUF + WRITE_BUF_SIZE * 4;
+export const COMPUTE_BUF_SIZE = 1024;
+export const COMPUTE_BUF = WRITE_BUF + WRITE_BUF_SIZE * 4;
+export const COMPUTE_RESULT_BUF_SIZE = 1024;
+export const COMPUTE_RESULT_BUF = COMPUTE_BUF + COMPUTE_BUF_SIZE * 4;
+export const POOL_BASE = COMPUTE_RESULT_BUF + COMPUTE_RESULT_BUF_SIZE * 4;
 export const SN_BYTES = 24;
 
 const LINK_BASE = POOL_BASE + POOL_CAP * SN_BYTES;
@@ -44,6 +49,7 @@ export function defineEngine() {
     asm(`(i32.store (i32.const ${G_EPOCH}) (i32.const 0))`);
     asm(`(i32.store (i32.const ${G_SIG_COUNT}) (i32.const 0))`);
     asm(`(i32.store (i32.const ${G_LINK_COUNT}) (i32.const 0))`);
+    asm(`(i32.store (i32.const ${G_FREE_LINK}) (i32.const -1))`);
     asm(`(i32.store (i32.const ${G_HEAP_MIN}) (i32.const 0))`);
     asm(`(i32.store (i32.const ${G_HEAP_MAX}) (i32.const -1))`);
     asm(`(i32.store (i32.const ${G_EFFECT_COUNT}) (i32.const 0))`);
@@ -289,8 +295,17 @@ export function defineEngine() {
       let nxt = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(8)));
       depHead.assign(nxt);
     });
-    let lc = asmExpr(`(i32.load (i32.const ${G_LINK_COUNT}))`, "i32").toVar();
-    asm(`(i32.store (i32.const ${G_LINK_COUNT}) $0)`, lc.add(i32(1)));
+    let lc = i32(0).toVar();
+    let freeListVal = asmExpr(`(i32.load (i32.const ${G_FREE_LINK}))`, "i32");
+    If(freeListVal.ge(i32(0)), () => {
+      lc.assign(freeListVal);
+      let nextFree = asmExpr(`(i32.load $0)`, "i32", i32(LINK_BASE).add(freeListVal.mul(i32(LN_BYTES))));
+      asm(`(i32.store (i32.const ${G_FREE_LINK}) $0)`, nextFree);
+    }).Else(() => {
+      let newCount = asmExpr(`(i32.load (i32.const ${G_LINK_COUNT}))`, "i32");
+      lc.assign(newCount);
+      asm(`(i32.store (i32.const ${G_LINK_COUNT}) $0)`, newCount.add(i32(1)));
+    });
     let laddr = i32(LINK_BASE).add(lc.mul(i32(LN_BYTES)));
     asm(`(i32.store $0 $1)`, laddr, depIdx);
     asm(`(i32.store $0 $1)`, laddr.add(i32(4)), subIdx);
@@ -328,56 +343,60 @@ export function defineEngine() {
     });
   });
 
-  function removeStaleDepsFwd(stale: Node<"i32">, sigIdx: Node<"i32">, addr: Node<"i32">): void {
-    let s = stale.toVar();
-    While(s.ge(i32(0)), () => {
-      let lnk = i32(LINK_BASE).add(s.mul(i32(LN_BYTES)));
-      let linkSub = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(4)));
-      let stillNeeded = linkSub.eq(sigIdx).ne(i32(0));
-      If(stillNeeded, () => {
-        let nxt = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(8)));
-        s.assign(nxt);
+  function clearDeps(sigIdx: Node<"i32">, addr: Node<"i32">): void {
+    let dep = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(8))).toVar();
+    While(dep.ge(i32(0)), () => {
+      let lnk = i32(LINK_BASE).add(dep.mul(i32(LN_BYTES)));
+      let depIdx = asmExpr(`(i32.load $0)`, "i32", lnk);
+      let prevSub = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(12)));
+      let nextSub = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(16)));
+      let prevDep = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(20)));
+      let nextDep = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(8)));
+      let depPoolAddr = i32(POOL_BASE).add(depIdx.mul(i32(SN_BYTES)));
+      If(prevSub.ge(i32(0)), () => {
+        asm(`(i32.store $0 $1)`, i32(LINK_BASE).add(prevSub.mul(i32(LN_BYTES))).add(i32(16)), nextSub);
       }).Else(() => {
-        let depIdx = asmExpr(`(i32.load $0)`, "i32", lnk);
-        let prevSub = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(12)));
-        let nextSub = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(16)));
-        let prevDep = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(20)));
-        let nextDep = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(8)));
-        let nxt = nextDep;
-        let depAddr = i32(POOL_BASE).add(depIdx.mul(i32(SN_BYTES)));
-        If(prevSub.ge(i32(0)), () => {
-          asm(`(i32.store $0 $1)`, i32(LINK_BASE).add(prevSub.mul(i32(LN_BYTES))).add(i32(16)), nextSub);
-        }).Else(() => {
-          asm(`(i32.store $0 $1)`, depAddr.add(i32(4)), nextSub);
-        });
-        If(nextSub.ge(i32(0)), () => {
-          asm(`(i32.store $0 $1)`, i32(LINK_BASE).add(nextSub.mul(i32(LN_BYTES))).add(i32(12)), prevSub);
-        });
-        If(prevDep.ge(i32(0)), () => {
-          asm(`(i32.store $0 $1)`, i32(LINK_BASE).add(prevDep.mul(i32(LN_BYTES))).add(i32(8)), nextDep);
-        }).Else(() => {
-          asm(`(i32.store $0 $1)`, addr.add(i32(8)), nextDep);
-        });
-        If(nextDep.ge(i32(0)), () => {
-          asm(`(i32.store $0 $1)`, i32(LINK_BASE).add(nextDep.mul(i32(LN_BYTES))).add(i32(20)), prevDep);
-        });
-        s.assign(nxt);
+        asm(`(i32.store $0 $1)`, depPoolAddr.add(i32(4)), nextSub);
       });
+      If(nextSub.ge(i32(0)), () => {
+        asm(`(i32.store $0 $1)`, i32(LINK_BASE).add(nextSub.mul(i32(LN_BYTES))).add(i32(12)), prevSub);
+      });
+      If(prevDep.ge(i32(0)), () => {
+        asm(`(i32.store $0 $1)`, i32(LINK_BASE).add(prevDep.mul(i32(LN_BYTES))).add(i32(8)), nextDep);
+      }).Else(() => {
+        asm(`(i32.store $0 $1)`, addr.add(i32(8)), nextDep);
+      });
+      If(nextDep.ge(i32(0)), () => {
+        asm(`(i32.store $0 $1)`, i32(LINK_BASE).add(nextDep.mul(i32(LN_BYTES))).add(i32(20)), prevDep);
+      });
+      let curFreeHead = asmExpr(`(i32.load (i32.const ${G_FREE_LINK}))`, "i32");
+      asm(`(i32.store $0 $1)`, lnk, curFreeHead);
+      asm(`(i32.store (i32.const ${G_FREE_LINK}) $0)`, dep);
+      dep.assign(nextDep);
     });
   }
 
+  Fn("__sig_clear_deps", {
+    params: [{ name: "sigIdx", type: "i32" }],
+    result: "void",
+  }, (sigIdx) => {
+    let addr = i32(POOL_BASE).add(sigIdx.mul(i32(SN_BYTES)));
+    clearDeps(sigIdx, addr);
+  });
+
   function recomputeAndNotify(node: Node<"i32">, addr: Node<"i32">): void {
-    let newVal = asmExpr(`(call $bridge_recompute $0)`, "i32", node);
-    asm(`(i32.store $0 $1)`, addr, newVal);
-    let newSubs = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(4)));
-    If(newSubs.ge(i32(0)), () => {
-      let sl = newSubs.toVar();
-      While(sl.ge(i32(0)), () => {
-        let lnk = i32(LINK_BASE).add(sl.mul(i32(LN_BYTES)));
-        let si = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(4)));
-        asm(`(call $__heap_insert $0)`, si);
-        let nxt = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(16)));
-        sl.assign(nxt);
+    let changed = asmExpr(`(call $bridge_recompute $0)`, "i32", node);
+    If(changed.ne(i32(0)), () => {
+      let newSubs = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(4)));
+      If(newSubs.ge(i32(0)), () => {
+        let sl = newSubs.toVar();
+        While(sl.ge(i32(0)), () => {
+          let lnk = i32(LINK_BASE).add(sl.mul(i32(LN_BYTES)));
+          let si = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(4)));
+          asm(`(call $__heap_insert $0)`, si);
+          let nxt = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(16)));
+          sl.assign(nxt);
+        });
       });
     });
   }
@@ -393,22 +412,48 @@ export function defineEngine() {
       let headAddr = i32(HEAP_BASE).add(h.mul(i32(4)));
       let node = asmExpr(`(i32.load $0)`, "i32", headAddr).toVar();
       asm(`(i32.store $0 (i32.const -1))`, headAddr);
+      let computeCount = i32(0).toVar();
       While(node.ge(i32(0)), () => {
         let addr = i32(POOL_BASE).add(node.mul(i32(SN_BYTES)));
         let nxt = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(20))).toVar();
         asm(`(i32.store $0 (i32.const -1))`, addr.add(i32(20)));
         let flags = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(12)));
-        asm(`(i32.store $0 $1)`, addr.add(i32(12)), flags.and(i32(F_EFFECT | F_COMPUTED | F_HAS_OBJECT)));
+        asm(`(i32.store $0 $1)`, addr.add(i32(12)), flags.and(i32(F_EFFECT | F_COMPUTED)));
         If(flags.and(i32(F_EFFECT)).ne(i32(0)), () => {
           let ec = asmExpr(`(i32.load (i32.const ${G_EFFECT_COUNT}))`, "i32");
           asm(`(i32.store (i32.add (i32.const ${EFFECT_BUF}) (i32.mul $0 (i32.const 4))) $1)`, ec, node);
           asm(`(i32.store (i32.const ${G_EFFECT_COUNT}) (i32.add $0 (i32.const 1)))`, ec);
         });
-        If(flags.and(i32(F_COMPUTED)).ne(i32(0)), () => { recomputeAndNotify(node, addr); });
-        let curMax = asmExpr(`(i32.load (i32.const ${G_HEAP_MAX}))`, "i32");
-        If(curMax.gt(nextMax), () => { nextMax.assign(curMax); });
+        If(flags.and(i32(F_COMPUTED)).ne(i32(0)), () => {
+          asm(`(i32.store (i32.add (i32.const ${COMPUTE_BUF}) (i32.mul $0 (i32.const 4))) $1)`, computeCount, node);
+          computeCount.assign(computeCount.add(i32(1)));
+        });
         node.assign(nxt);
       });
+      If(computeCount.ne(i32(0)), () => {
+        asm(`(call $bridge_recompute_batch $0)`, computeCount);
+        let j = i32(0).toVar();
+        While(j.lt(computeCount), () => {
+          let changed = asmExpr(`(i32.load (i32.add (i32.const ${COMPUTE_RESULT_BUF}) (i32.mul $0 (i32.const 4))))`, "i32", j);
+          If(changed.ne(i32(0)), () => {
+            let sigIdx = asmExpr(`(i32.load (i32.add (i32.const ${COMPUTE_BUF}) (i32.mul $0 (i32.const 4))))`, "i32", j);
+            let subAddr = i32(POOL_BASE).add(sigIdx.mul(i32(SN_BYTES))).add(i32(4));
+            let newSubs = asmExpr(`(i32.load $0)`, "i32", subAddr);
+            If(newSubs.ge(i32(0)), () => {
+              let sl = newSubs.toVar();
+              While(sl.ge(i32(0)), () => {
+                let lnk = i32(LINK_BASE).add(sl.mul(i32(LN_BYTES)));
+                let si = asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(4)));
+                asm(`(call $__heap_insert $0)`, si);
+                sl.assign(asmExpr(`(i32.load $0)`, "i32", lnk.add(i32(16))));
+              });
+            });
+          });
+          j.assign(j.add(i32(1)));
+        });
+      });
+      let curMax = asmExpr(`(i32.load (i32.const ${G_HEAP_MAX}))`, "i32");
+      If(curMax.gt(nextMax), () => { nextMax.assign(curMax); });
       h.assign(h.add(i32(1)));
     });
   });
@@ -436,7 +481,7 @@ export function defineEngine() {
       recomputeAndNotify(sigIdx, addr);
     });
     let clearFlags = asmExpr(`(i32.load $0)`, "i32", addr.add(i32(12)));
-    asm(`(i32.store $0 $1)`, addr.add(i32(12)), clearFlags.and(i32(F_EFFECT | F_COMPUTED | F_HAS_OBJECT)));
+    asm(`(i32.store $0 $1)`, addr.add(i32(12)), clearFlags.and(i32(F_EFFECT | F_COMPUTED)));
   });
 
   Fn("__sig_get_value", {
@@ -468,11 +513,13 @@ export function compileEngine(): string {
       "__sig_set_observer", "__sig_get_observer",
       "__sig_link_impl", "__heap_insert", "__mark_dirty",
       "__sig_mark_heap", "__update_if_necessary",
+      "__sig_clear_deps",
     ],
     memoryPages: MEMORY_PAGES,
   });
   const imports = `
   (import "bridge" "recompute" (func $bridge_recompute (param i32) (result i32)))
+  (import "bridge" "recompute_batch" (func $bridge_recompute_batch (param i32)))
 `;
   return wat.replace("(module", `(module${imports}`);
 }

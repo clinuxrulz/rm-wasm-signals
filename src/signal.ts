@@ -1,5 +1,4 @@
-import { defineEngine, compileEngine, F_COMPUTED, F_DIRTY, F_CHECK, F_HAS_OBJECT } from "./engine.js";
-import { ValueMap } from "./value-map.js";
+import { defineEngine, compileEngine, F_COMPUTED, F_DIRTY, F_CHECK } from "./engine.js";
 
 type WasmExports = {
   __sig_init(): void;
@@ -9,6 +8,7 @@ type WasmExports = {
   __sig_flush(): void;
   __sig_process_tracking(count: number): void;
   __sig_process_and_flush(count: number): void;
+  __sig_clear_deps(sigIdx: number): void;
   memory: WebAssembly.Memory;
 };
 
@@ -19,13 +19,24 @@ const TRACK_BUF = 65680;
 const TRACK_BUF_SIZE = 1024;
 const WRITE_BUF = 66704;
 const WRITE_BUF_SIZE = 1024;
-const POOL_BASE_I32 = 67728;
+const COMPUTE_BUF_I32 = 67728;
+const COMPUTE_BUF_SIZE = 1024;
+const COMPUTE_RESULT_BUF_I32 = 68752;
+const POOL_BASE_I32 = 69776;
 const SN = 6;
+
+interface Owner {
+  owned: number[];
+  cleanups: (() => void)[];
+  owner: Owner | null;
+}
 
 export interface ReactiveAPI {
   createSignal<T>(initial: T): [() => T, (v: T) => void];
   createMemo<T>(fn: () => T): () => T;
   createEffect(fn: () => void): void;
+  createRoot<T>(fn: (dispose: () => void) => T): T;
+  onCleanup(fn: () => void): void;
   flush(): void;
   batch<T>(fn: () => T): T;
   reset(): void;
@@ -35,29 +46,88 @@ export async function init(): Promise<ReactiveAPI> {
   defineEngine();
   const wat = compileEngine();
 
-  const computedFns = new Map<number, () => any>();
-  const effectFns = new Map<number, () => void>();
-  const valueMap = new ValueMap();
+  const signalValues: any[] = [undefined];
+  const computedFns: (() => any)[] = [];
+  const effectFns: (() => void)[] = [];
+  const signalOwners: (Owner | undefined)[] = [];
+  let currentOwner: Owner | null = null;
   let wasm: WasmExports;
   let trackPos = 0;
   let writePos = 0;
 
+  function cleanNode(owner: Owner): void {
+    for (let i = owner.owned.length - 1; i >= 0; i--) {
+      const idx = owner.owned[i];
+      const childOwner = signalOwners[idx];
+      if (childOwner) cleanNode(childOwner);
+      signalValues[idx] = undefined;
+      computedFns[idx] = undefined;
+      effectFns[idx] = undefined;
+    }
+    owner.owned = [];
+    for (let i = owner.cleanups.length - 1; i >= 0; i--) {
+      owner.cleanups[i]();
+    }
+    owner.cleanups = [];
+  }
+
   const bridge = {
     recompute: (computedIdx: number): number => {
-      const fn = computedFns.get(computedIdx);
+      const fn = computedFns[computedIdx];
       if (!fn) return 0;
+      const owner = signalOwners[computedIdx];
+      if (owner) cleanNode(owner);
+      const prevOwner = currentOwner;
+      currentOwner = owner;
       const u32 = view();
       const prevObserver = u32[G_OBSERVER];
       u32[G_OBSERVER] = computedIdx;
       trackPos = 0;
+      wasm.__sig_clear_deps(computedIdx);
       const result = fn();
       if (trackPos > 0) {
         wasm.__sig_process_tracking(trackPos);
         trackPos = 0;
       }
       u32[G_OBSERVER] = prevObserver;
-      if (typeof result === 'number') return result;
-      return valueMap.alloc(result);
+      currentOwner = prevOwner;
+      const oldValue = signalValues[computedIdx];
+      if (Object.is(oldValue, result)) return 0;
+      signalValues[computedIdx] = result;
+      return 1;
+    },
+    recompute_batch: (count: number): void => {
+      const u32 = view();
+      for (let i = 0; i < count; i++) {
+        const sigIdx = u32[COMPUTE_BUF_I32 + i];
+        const fn = computedFns[sigIdx];
+        if (!fn) {
+          u32[COMPUTE_RESULT_BUF_I32 + i] = 0;
+          continue;
+        }
+        const owner = signalOwners[sigIdx];
+        if (owner) cleanNode(owner);
+        const prevOwner = currentOwner;
+        currentOwner = owner;
+        const prevObserver = u32[G_OBSERVER];
+        u32[G_OBSERVER] = sigIdx;
+        trackPos = 0;
+        wasm.__sig_clear_deps(sigIdx);
+        const result = fn();
+        if (trackPos > 0) {
+          wasm.__sig_process_tracking(trackPos);
+          trackPos = 0;
+        }
+        u32[G_OBSERVER] = prevObserver;
+        currentOwner = prevOwner;
+        const oldValue = signalValues[sigIdx];
+        if (Object.is(oldValue, result)) {
+          u32[COMPUTE_RESULT_BUF_I32 + i] = 0;
+        } else {
+          signalValues[sigIdx] = result;
+          u32[COMPUTE_RESULT_BUF_I32 + i] = 1;
+        }
+      }
     },
   };
 
@@ -80,14 +150,9 @@ export async function init(): Promise<ReactiveAPI> {
   };
 
   const createSignal = <T>(initial: T): [() => T, (v: T) => void] => {
-    let sigIdx: number;
-    if (typeof initial === 'number') {
-      sigIdx = wasm.__sig_alloc_signal(initial as number);
-    } else {
-      const id = valueMap.alloc(initial);
-      sigIdx = wasm.__sig_alloc_signal(id);
-      view()[POOL_BASE_I32 + sigIdx * SN + 3] |= F_HAS_OBJECT;
-    }
+    const sigIdx = wasm.__sig_alloc_signal(0);
+    signalValues[sigIdx] = initial;
+    if (currentOwner) currentOwner.owned.push(sigIdx);
 
     const getter = (): T => {
       const u32 = view();
@@ -104,22 +169,18 @@ export async function init(): Promise<ReactiveAPI> {
           trackPos = 0;
         }
       }
-      const val = u32[depAddr];
-      if (u32[depAddr + 3] & F_HAS_OBJECT) return valueMap.get(val) as T;
-      return val as unknown as T;
+      return signalValues[sigIdx];
     };
 
     const setter = (val: T): void => {
+      const oldValue = signalValues[sigIdx];
+      if (Object.is(oldValue, val)) return;
+      signalValues[sigIdx] = val;
       const u32 = view();
-      const depAddr = POOL_BASE_I32 + sigIdx * SN;
-      const newId = u32[depAddr + 3] & F_HAS_OBJECT ? valueMap.alloc(val) : val as number;
-      if (u32[depAddr] !== newId) {
-        u32[depAddr] = newId;
-        u32[WRITE_BUF + (writePos++)] = sigIdx;
-        if (writePos >= WRITE_BUF_SIZE) {
-          wasm.__sig_process_and_flush(writePos);
-          writePos = 0;
-        }
+      u32[WRITE_BUF + (writePos++)] = sigIdx;
+      if (writePos >= WRITE_BUF_SIZE) {
+        wasm.__sig_process_and_flush(writePos);
+        writePos = 0;
       }
       if (batching === 0) {
         queueMicrotask(() => flush());
@@ -131,22 +192,24 @@ export async function init(): Promise<ReactiveAPI> {
 
   const createMemo = <T>(fn: () => T): () => T => {
     const idx = wasm.__sig_alloc_computed(0);
-    computedFns.set(idx, fn);
+    computedFns[idx] = fn;
+    const owner: Owner = { owned: [], cleanups: [], owner: currentOwner };
+    signalOwners[idx] = owner;
+    if (currentOwner) currentOwner.owned.push(idx);
+    const prevOwner = currentOwner;
+    currentOwner = owner;
 
-    view()[G_OBSERVER] = idx;
+    const u32 = view();
+    u32[G_OBSERVER] = idx;
     trackPos = 0;
     const initial = fn();
     if (trackPos > 0) {
       wasm.__sig_process_tracking(trackPos);
       trackPos = 0;
     }
-    view()[G_OBSERVER] = 0;
-    if (typeof initial === 'number') {
-      view()[POOL_BASE_I32 + idx * SN] = initial;
-    } else {
-      view()[POOL_BASE_I32 + idx * SN] = valueMap.alloc(initial);
-      view()[POOL_BASE_I32 + idx * SN + 3] |= F_HAS_OBJECT;
-    }
+    u32[G_OBSERVER] = 0;
+    signalValues[idx] = initial;
+    currentOwner = prevOwner;
 
     return () => {
       const u32 = view();
@@ -163,15 +226,18 @@ export async function init(): Promise<ReactiveAPI> {
           trackPos = 0;
         }
       }
-      const val = u32[depAddr];
-      if (u32[depAddr + 3] & F_HAS_OBJECT) return valueMap.get(val) as T;
-      return val as unknown as T;
+      return signalValues[idx];
     };
   };
 
   const createEffect = (fn: () => void): void => {
     const idx = wasm.__sig_alloc_effect(0);
-    effectFns.set(idx, fn);
+    effectFns[idx] = fn;
+    const owner: Owner = { owned: [], cleanups: [], owner: currentOwner };
+    signalOwners[idx] = owner;
+    if (currentOwner) currentOwner.owned.push(idx);
+    const prevOwner = currentOwner;
+    currentOwner = owner;
 
     view()[G_OBSERVER] = idx;
     trackPos = 0;
@@ -181,6 +247,7 @@ export async function init(): Promise<ReactiveAPI> {
       trackPos = 0;
     }
     view()[G_OBSERVER] = 0;
+    currentOwner = prevOwner;
   };
 
   const flush = (): void => {
@@ -196,16 +263,22 @@ export async function init(): Promise<ReactiveAPI> {
       u32[G_EFFECT_COUNT] = 0;
       for (let i = 0; i < count; i++) {
         const effectIdx = u32[EFFECT_BUF + i];
-        const fn = effectFns.get(effectIdx);
+        const fn = effectFns[effectIdx];
         if (!fn) continue;
+        const owner = signalOwners[effectIdx];
+        if (owner) cleanNode(owner);
+        const prevOwner = currentOwner;
+        currentOwner = owner;
         u32[G_OBSERVER] = effectIdx;
         trackPos = 0;
+        wasm.__sig_clear_deps(effectIdx);
         fn();
         if (trackPos > 0) {
           wasm.__sig_process_tracking(trackPos);
           trackPos = 0;
         }
         u32[G_OBSERVER] = 0;
+        currentOwner = prevOwner;
       }
     }
   };
@@ -221,13 +294,32 @@ export async function init(): Promise<ReactiveAPI> {
     }
   };
 
+  const createRoot = <T>(fn: (dispose: () => void) => T): T => {
+    const prev = currentOwner;
+    const owner: Owner = { owned: [], cleanups: [], owner: prev };
+    currentOwner = owner;
+    try {
+      return fn(() => cleanNode(owner));
+    } finally {
+      currentOwner = prev;
+    }
+  };
+
+  const onCleanup = (fn: () => void): void => {
+    if (currentOwner) currentOwner.cleanups.push(fn);
+  };
+
   const reset = (): void => {
-    computedFns.clear();
-    effectFns.clear();
-    valueMap.clear();
+    currentOwner = null;
+    signalOwners.length = 0;
+    signalValues.length = 0;
+    signalValues[0] = undefined;
+    computedFns.length = 0;
+    effectFns.length = 0;
+    trackPos = 0;
     writePos = 0;
     wasm.__sig_init();
   };
 
-  return { createSignal, createMemo, createEffect, flush, batch, reset };
+  return { createSignal, createMemo, createEffect, createRoot, onCleanup, flush, batch, reset };
 }

@@ -184,4 +184,125 @@ describe("rm-wasm-signals", () => {
     flush();
     expect(recomputeCount).toBe(1);
   });
+
+  it("createRoot disposes owned signals on dispose", async () => {
+    const { createSignal, createRoot } = await init();
+    let sig: () => number;
+    createRoot((dispose) => {
+      const [count] = createSignal(42);
+      sig = count;
+      expect(count()).toBe(42);
+      dispose();
+      expect(() => count()).not.toThrow();
+    });
+  });
+
+  it("onCleanup runs when root is disposed", async () => {
+    const { createRoot, onCleanup } = await init();
+    let cleaned = false;
+    createRoot((dispose) => {
+      onCleanup(() => { cleaned = true; });
+      expect(cleaned).toBe(false);
+      dispose();
+      expect(cleaned).toBe(true);
+    });
+  });
+
+  it("createRoot returns the value from fn", async () => {
+    const { createRoot } = await init();
+    const result = createRoot(() => "hello");
+    expect(result).toBe("hello");
+  });
+
+  it("nested createRoot: inner dispose does not affect outer", async () => {
+    const { createRoot, createSignal, onCleanup } = await init();
+    let outerCleaned = false;
+    let innerSig: () => number;
+    let outerSig: () => number;
+
+    createRoot((outerDispose) => {
+      [outerSig] = createSignal(1);
+      onCleanup(() => { outerCleaned = true; });
+
+      createRoot((innerDispose) => {
+        [innerSig] = createSignal(2);
+        innerDispose();
+      });
+
+      expect(outerCleaned).toBe(false);
+      outerDispose();
+      expect(outerCleaned).toBe(true);
+    });
+  });
+
+  it("memo auto-cleans inner signals on recompute", async () => {
+    const { createSignal, createMemo, flush } = await init();
+    const [x, setX] = createSignal(0);
+    let createdCount = 0;
+
+    const m = createMemo(() => {
+      // Each recompute creates a new signal owned by the memo
+      const [inner] = createSignal(x());
+      createdCount++;
+      return inner();
+    });
+
+    expect(m()).toBe(0);
+    expect(createdCount).toBe(1);
+
+    setX(1);
+    flush();
+    expect(m()).toBe(1);
+    // createdCount increments each recompute as old signal is cleaned, new one created
+    expect(createdCount).toBe(2);
+  });
+
+  it("effect auto-cleans inner signals on re-run", async () => {
+    const { createSignal, createEffect, onCleanup, flush } = await init();
+    const [x, setX] = createSignal(0);
+    let innerValue = -1;
+    let cleanupRan = false;
+
+    createEffect(() => {
+      const [inner] = createSignal(x());
+      onCleanup(() => { cleanupRan = true; });
+      innerValue = inner();
+    });
+
+    expect(innerValue).toBe(0);
+    expect(cleanupRan).toBe(false);
+
+    setX(1);
+    flush();
+    expect(innerValue).toBe(1);
+    expect(cleanupRan).toBe(true);
+  });
+
+  it("stale dynamic deps are cleaned up on recompute", async () => {
+    const { createSignal, createMemo, flush } = await init();
+    const [toggle, setToggle] = createSignal(true);
+    const [a, setA] = createSignal(1);
+    const [b, setB] = createSignal(10);
+    let recomputeCount = 0;
+    const c = createMemo(() => {
+      recomputeCount++;
+      return toggle() ? a() : b();
+    });
+    expect(c()).toBe(1);
+    expect(recomputeCount).toBe(1);
+    setToggle(false);
+    flush();
+    expect(c()).toBe(10);
+    expect(recomputeCount).toBe(2);
+    // a is no longer a dep — changing it should NOT trigger recompute
+    setA(999);
+    flush();
+    expect(recomputeCount).toBe(2);
+    expect(c()).toBe(10);
+    // b is still a dep — changing it should trigger recompute
+    setB(20);
+    flush();
+    expect(recomputeCount).toBe(3);
+    expect(c()).toBe(20);
+  });
 });
